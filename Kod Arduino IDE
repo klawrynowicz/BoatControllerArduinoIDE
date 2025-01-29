@@ -1,0 +1,180 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+
+// Nazwa i hasło do trybu Access Point
+const char* ssid = "BoatController";
+const char* password = "Boat123!";
+
+
+// Tworzymy serwer na porcie 80
+WebServer server(80);
+
+
+// Definiujemy piny:
+const int pinLights   = 8;  // D4 -> Światła
+const int pinMotor1   = 2;  // D2 -> Silnik 1 (PWM)
+const int pinMotor2   = 3;  // D3 -> Silnik 2 (PWM)
+const int pinBait     = 5;  // D5 -> Zrzut zanęty
+
+
+// Kanały PWM (ESP32 ma sprzętowe kanały PWM tzw. LEDC)
+const int ledcChannelMotor1 = 0;
+const int ledcChannelMotor2 = 1;
+
+
+// Parametry PWM
+const int ledcResolution = 8;    // Rozdzielczość 8-bit (0-255)
+const int ledcFrequency  = 2000; // Częstotliwość PWM 2 kHz (można dostosować)
+
+
+// Zmienne do obsługi stanu
+bool lightsOn     = false;  // Informacja o tym, czy światła są włączone
+bool baitReleased = false;  // Informacja o tym, czy zrzut zanęty został użyty (jednorazowo)
+
+
+// -------------------------
+// Obsługa wywołań HTTP
+// -------------------------
+
+
+// Strona główna (testowa)
+void handleRoot() {
+ server.send(200, "text/html", "<h1>TEST ESP32</h1>");
+}
+
+
+// Obsługa świateł: /lights?state=on lub /lights?state=off
+void handleLights() {
+ if (server.hasArg("state")) {
+   String state = server.arg("state");
+   lightsOn = (state == "on");
+   // Ustaw stan pinu świateł (on/off)
+   digitalWrite(pinLights, lightsOn ? HIGH : LOW);
+
+
+   Serial.println(lightsOn ? "Światła włączone" : "Światła wyłączone");
+   server.send(200, "text/plain", lightsOn ? "Lights On" : "Lights Off");
+ } else {
+   // Brak argumentu 'state' => błąd
+   server.send(400, "text/plain", "Błąd: Brak parametru 'state' (użyj ?state=on lub ?state=off)");
+ }
+}
+
+
+// Obsługa zrzutu zanęty: /bait (jednorazowe uruchomienie)
+void handleBait() {
+ // Sprawdzenie, czy zrzut był już aktywowany:
+ if (!baitReleased) {
+   // Jeżeli nie, to aktywujemy
+   baitReleased = true;
+   digitalWrite(pinBait, HIGH);   // Uruchomienie zrzutu (stan wysoki)
+
+
+   Serial.println("Zrzut zanęty aktywowany - jednorazowy");
+   server.send(200, "text/plain", "Bait Released - one time only");
+ } else {
+   // Zrzut został już wykonany
+   Serial.println("Zrzut zanęty był już wykonany - nieaktywny");
+   server.send(200, "text/plain", "Bait was already released - no further action");
+ }
+}
+
+
+// Obsługa joysticka: /move?x=...&y=...
+void handleMove() {
+ if (server.hasArg("x") && server.hasArg("y")) {
+   int x = server.arg("x").toInt(); // od -100 do +100
+   int y = server.arg("y").toInt(); // od -100 do +100
+  
+   Serial.print("Joystick - X: ");
+   Serial.print(x);
+   Serial.print(" | Y: ");
+   Serial.println(y);
+
+
+   // Proste sterowanie "czołgowe" (differential):
+   int leftMotor  = y - x;
+   int rightMotor = y + x;
+
+
+   // Ograniczamy wartości do zakresu -100..100
+   leftMotor  = max(-100, min(100, leftMotor));
+   rightMotor = max(-100, min(100, rightMotor));
+
+
+   // Ten przykład nie obsługuje cofania, więc jeśli wyjdzie < 0, to dajemy 0 (stop)
+   if (leftMotor < 0) leftMotor = 0;
+   if (rightMotor < 0) rightMotor = 0;
+
+
+   // Mamy zakres 0..100 => mapujemy go na 0..255 (PWM 8-bit)
+   int pwmLeft  = map(leftMotor,  0, 100, 0, 255);
+   int pwmRight = map(rightMotor, 0, 100, 0, 255);
+
+
+   // Ustawiamy prędkości na kanałach PWM
+   ledcWrite(ledcChannelMotor1, pwmLeft);
+   ledcWrite(ledcChannelMotor2, pwmRight);
+
+
+   server.send(200, "text/plain", "Joystick Position Updated");
+ } else {
+   server.send(400, "text/plain", "Błąd: Brak parametrów 'x' lub 'y'");
+ }
+}
+
+
+// -------------------------
+// Funkcja setup
+// -------------------------
+void setup() {
+ Serial.begin(115200);
+  // Ustawienia pinów
+ pinMode(pinLights, OUTPUT);
+ digitalWrite(pinLights, LOW); // na starcie światła wyłączone
+
+
+ pinMode(pinBait, OUTPUT);
+ digitalWrite(pinBait, LOW);   // na starcie zrzut zanęty nieaktywny
+
+
+ // Konfiguracja PWM dla silników (2 kanały)
+ ledcSetup(ledcChannelMotor1, ledcFrequency, ledcResolution);
+ ledcSetup(ledcChannelMotor2, ledcFrequency, ledcResolution);
+
+
+ // Przypisanie pinów do kanałów
+ ledcAttachPin(pinMotor1, ledcChannelMotor1);
+ ledcAttachPin(pinMotor2, ledcChannelMotor2);
+
+
+ // Uruchamiamy Access Point
+ WiFi.softAP(ssid, password);
+
+
+ Serial.println("Uruchomiono punkt dostępowy (AP).");
+ Serial.print("Adres IP: ");
+ Serial.println(WiFi.softAPIP());
+
+
+ // Rejestracja obsługi endpointów
+ server.on("/", handleRoot);
+ server.on("/lights", handleLights);
+ server.on("/bait", handleBait);
+ server.on("/move", handleMove);
+
+
+ // Start serwera
+ server.begin();
+ Serial.println("Serwer uruchomiony na porcie 80.");
+}
+
+
+// -------------------------
+// Funkcja loop
+// -------------------------
+void loop() {
+ // Obsługa zapytań HTTP
+ server.handleClient();
+}
